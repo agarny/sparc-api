@@ -1,3 +1,4 @@
+import json
 def create_query_string(query_string):
     return {
         "from": 0,

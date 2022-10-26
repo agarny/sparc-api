@@ -32,6 +32,7 @@ from app.utilities import img_to_base64_str
 from app.osparc import start_simulation as do_start_simulation
 from app.osparc import check_simulation as do_check_simulation
 from app.biolucida_process_results import process_results as process_biolucida_results
+from app.bfworker import BFWorker
 
 app = Flask(__name__)
 # set environment variable
@@ -41,6 +42,7 @@ CORS(app)
 
 ma = Marshmallow(app)
 email_sender = EmailSender()
+bfWorker = BFWorker(None)
 
 ps = None
 s3 = boto3.client(
@@ -369,33 +371,91 @@ def get_discover_path():
 
 # Reverse proxy for objects from S3, a simple get object
 # operation. This is used by scaffoldvuer and its
-# important to keep the relative <path> for accessing
-# other required files.
-@app.route("/s3-resource/<path:path>")
+# # important to keep the relative <path> for accessing
+# # other required files.
+# @app.route("/s3-resource/<path:path>")
+# def direct_download_url(path):
+#     print(path)
+#     head_response = s3.head_object(
+#         Bucket=Config.S3_BUCKET_NAME,
+#         Key=path,
+#         RequestPayer="requester"
+#     )
+#
+#     content_length = head_response.get('ContentLength', Config.DIRECT_DOWNLOAD_LIMIT)
+#     if content_length and content_length > Config.DIRECT_DOWNLOAD_LIMIT:  # 20 MB
+#         return abort(413, description=f"File too big to download: {content_length}")
+#
+#     response = s3.get_object(
+#         Bucket=Config.S3_BUCKET_NAME,
+#         Key=path,
+#         RequestPayer="requester"
+#     )
+#
+#     encode_base64 = request.args.get("encodeBase64")
+#     resource = response["Body"].read()
+#     if encode_base64 is not None:
+#         return base64.b64encode(resource)
+#
+#     return resource
+
+# This version of s3-resouces is used for accessing files on staging. Use it as a replacement for 's3-resource'
+# No changes are need on the front end, just use s3-resource as normal
+# @app.route("/s3-resource/<path:path>")
 def direct_download_url(path):
-    head_response = s3.head_object(
-        Bucket=Config.S3_BUCKET_NAME,
-        Key=path,
-        RequestPayer="requester"
-    )
+    print(path)
+    filePath = path.split('files/')[-1]
+    discoverId = path.split('/')[0]
+    dataset_query = {
+        "size": 20,
+        "from": 0,
+        "query": {
+            "query_string": {
+                "fields": [
+                    "*pennsieve.identifier"
+                ],
+                "query": discoverId
+            }
+        },
+        "_source": [
+            "item.identifier"
+        ]
+    }
+    resp = dataset_search(dataset_query)
+    pennsieveId = resp['hits']['hits'][0]['_source']['item']['identifier']
+    url = bfWorker.getURLFromDatasetIdAndFilePath(pennsieveId, filePath)
+    if url != None:
+        resp2 = requests.get(url)
+        return resp2.content
+    return jsonify({'error': 'error with the provided ID '}, status=502)
 
-    content_length = head_response.get('ContentLength', Config.DIRECT_DOWNLOAD_LIMIT)
-    if content_length and content_length > Config.DIRECT_DOWNLOAD_LIMIT:  # 20 MB
-        return abort(413, description=f"File too big to download: {content_length}")
+# This version of s3-resouces is used for accessing files on staging that have never been published
+@app.route("/s3-resource/<path:path>")
+def direct_download_url2(path):
+    print(path)
+    filePath = path.split('files/')[-1]
+    pennsieveId = path.split('/')[0]
 
-    response = s3.get_object(
-        Bucket=Config.S3_BUCKET_NAME,
-        Key=path,
-        RequestPayer="requester"
-    )
+    # If length is small, we have a pennsieve discover id. We will process this one with the normal s3-resource route
+    if len(pennsieveId) <= 4:
+        return direct_download_url(path)
 
-    encode_base64 = request.args.get("encodeBase64")
-    resource = response["Body"].read()
-    if encode_base64 is not None:
-        return base64.b64encode(resource)
+    if 'N:package:' not in pennsieveId:
+        pennsieveId = 'N:dataset:' + pennsieveId
 
-    return resource
+    url = bfWorker.getURLFromDatasetIdAndFilePath(pennsieveId, filePath)
+    if url != None:
+        resp2 = requests.get(url)
+        return resp2.content
+    return jsonify({'error': 'error with the provided ID '}, status=502)
 
+
+@app.route("/proxy/")
+def proxy():
+    url = request.args.get('url')
+    resp = requests.get(url)
+    return resp.content
+    return jsonify({'error': 'error with the provided ID '}, status=502)
 
 @app.route("/scicrunch-dataset/<doi1>/<doi2>")
 def sci_doi(doi1, doi2):
@@ -471,6 +531,30 @@ def get_dataset_info_discoverIds():
 
     return process_results(dataset_search(query))
 
+@app.route('/urlFromPennsieveDatasetIdAndFilePath/<discoverId>')
+def getFileUrlFromPennsieve(discoverId):
+    filePath = request.args.get('filePath')
+    dataset_query = {
+        "size": 20,
+        "from": 0,
+        "query": {
+            "query_string": {
+                "fields": [
+                    "*pennsieve.identifier"
+                ],
+                "query": discoverId
+            }
+        },
+        "_source": [
+            "item.identifier"
+        ]
+    }
+    resp = dataset_search(dataset_query)
+    pennsieveId = resp['hits']['hits'][0]['_source']['item']['identifier']
+    url = bfWorker.getURLFromDatasetIdAndFilePath(pennsieveId, filePath)
+    if url != None:
+        return jsonify({'url': url})
+    return jsonify({'error': 'error with the provided ID '}, status=502)
 
 @app.route("/dataset_info/using_title")
 def get_dataset_info_title():
